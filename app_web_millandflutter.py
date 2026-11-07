@@ -3,160 +3,146 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ==========================================
-# CONFIGURAÇÃO DA PÁGINA WEB
+# 1. CONFIGURAÇÃO DA PÁGINA
 # ==========================================
-st.set_page_config(page_title="CNC Millalyzer Web", layout="wide")
-st.title("Simulador Dinâmico CNC (Makera Z1)")
-
-# Aumentar fontes do Matplotlib para o ecrã do telemóvel
-plt.style.use('dark_background')
-plt.rcParams.update({'font.size': 12, 'lines.linewidth': 2, 'figure.dpi': 120})
+st.set_page_config(page_title="Makera Z1 CNC Simulator", page_icon="⚙️", layout="wide")
+st.title("⚙️ Simulador CNC Makera Z1")
+st.markdown("Análise de Forças de Corte, Potência e Lóbulos de Estabilidade (Chatter)")
 
 # ==========================================
-# BASE DE DADOS E MOTOR MATEMÁTICO
+# 2. BASE DE DADOS DE MATERIAIS (Kienzle)
 # ==========================================
-MATERIAIS = {
-    "Alumínio 6061-T6": (750.0, 250.0),
-    "Alumínio 5000 (ex: 5083)": (700.0, 220.0),
-    "POM (Delrin / Acetal)": (200.0, 50.0),
-    "Aço CK55 (Médio Carbono)": (2200.0, 800.0)
+# Valores aproximados de Pressão Específica de Corte (kc1.1 em N/mm²) e coeficiente (m)
+materiais = {
+    "Alumínio 6061-T6": {"kc": 700, "m": 0.25},
+    "Alumínio 5000": {"kc": 600, "m": 0.25},
+    "POM (Delrin)": {"kc": 150, "m": 0.20},
+    "Aço CK55": {"kc": 1900, "m": 0.26}
 }
 
-def simular_forcas(D, flutes, helix_deg, doc, woc, feedrate, rpm, ktc, krc):
-    feed_per_tooth = feedrate / (rpm * flutes)
-    N_z = 100
-    dz = doc / N_z
-    z_array = np.linspace(0, doc, N_z)
-    phi_exit = np.pi 
-    phi_entry = np.pi - np.arccos(1 - (2 * woc / D))
-    helix_rad = np.radians(helix_deg)
-    lag_angle_z = z_array * (2 * np.tan(helix_rad) / D)
-    
-    theta_array = np.linspace(0, 2*np.pi, 360)
-    Fx_total, Fy_total, Torque_total = np.zeros(360), np.zeros(360), np.zeros(360)
-    
-    for t_idx, theta in enumerate(theta_array):
-        Fx_inst, Fy_inst, T_inst = 0, 0, 0
-        for flute in range(int(flutes)):
-            pitch_angle = flute * (2 * np.pi / flutes)
-            for z_idx, z in enumerate(z_array):
-                phi = (theta + pitch_angle - lag_angle_z[z_idx]) % (2 * np.pi)
-                if phi_entry <= phi <= phi_exit:
-                    h = feed_per_tooth * np.sin(phi)
-                    dFt = ktc * h * dz
-                    dFr = krc * h * dz
-                    Fx_inst += -dFt * np.cos(phi) - dFr * np.sin(phi)
-                    Fy_inst += dFt * np.sin(phi) - dFr * np.cos(phi)
-                    T_inst += dFt * (D / 2000)
-                    
-        Fx_total[t_idx] = Fx_inst
-        Fy_total[t_idx] = Fy_inst
-        Torque_total[t_idx] = T_inst
-        
-    return theta_array, Fx_total, Fy_total, Torque_total, feed_per_tooth
-
-def simular_lobulos(fn, zeta, k_stiffness, flutes, ktc_n_mm2, woc, D):
-    wn = 2 * np.pi * fn
-    m = k_stiffness / (wn**2)
-    c = 2 * zeta * np.sqrt(k_stiffness * m)
-    mu = woc / D
-    
-    wc = np.linspace(fn, fn * 1.5, 2000) * 2 * np.pi
-    FRF = 1 / (-m * wc**2 + 1j * c * wc + k_stiffness)
-    Re_G = np.real(FRF)
-    Im_G = np.imag(FRF)
-    
-    valid = Re_G < 0
-    wc = wc[valid]
-    Re_G = Re_G[valid]
-    Im_G = Im_G[valid]
-    
-    Kt_n_m2 = ktc_n_mm2 * 1e6 
-    a_lim = -1 / (flutes * Kt_n_m2 * mu * Re_G)
-    
-    rpm_list, alim_list = [], []
-    for k_lobe in range(4):
-        epsilon = np.pi - 2 * np.arctan2(Im_G, Re_G)
-        tau = (epsilon + 2 * np.pi * k_lobe) / wc
-        rpm = 60 / (flutes * tau)
-        valid_rpm = (rpm > 2000) & (rpm < 20000)
-        rpm_list.append(rpm[valid_rpm])
-        alim_list.append(a_lim[valid_rpm] * 1000)
-        
-    return rpm_list, alim_list, np.min(a_lim)*1000
-
 # ==========================================
-# INTERFACE WEB (SIDEBAR INPUTS)
+# 3. BARRA LATERAL (INPUTS DO UTILIZADOR)
 # ==========================================
+st.sidebar.header("Parâmetros da Máquina e Fresa")
+
+material_escolhido = st.sidebar.selectbox("Material da Peça", list(materiais.keys()))
+rpm = st.sidebar.number_input("Rotações do Spindle (RPM)", min_value=1000, max_value=24000, value=11000, step=1000)
+num_facas = st.sidebar.number_input("Número de Facas (Flutes)", min_value=1, max_value=6, value=2, step=1)
+diametro = st.sidebar.number_input("Diâmetro da Fresa (mm)", min_value=1.0, max_value=20.0, value=6.0, step=0.1)
+
 st.sidebar.header("Parâmetros de Corte")
-material = st.sidebar.selectbox("Material", list(MATERIAIS.keys()))
+avanco = st.sidebar.number_input("Avanço (mm/min)", min_value=10, max_value=5000, value=1000, step=50)
+ap = st.sidebar.number_input("Profundidade de Corte - ap (mm)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
+ae = st.sidebar.number_input("Largura de Corte - ae (mm)", min_value=0.1, max_value=diametro, value=diametro, step=0.1)
 
-col_fresa1, col_fresa2 = st.sidebar.columns(2)
-D = col_fresa1.number_input("Fresa (mm)", value=4.0, step=1.0)
-flutes = col_fresa2.number_input("Cortes", value=3, step=1)
-hel = st.sidebar.number_input("Hélice (º)", value=45.0)
-
-st.sidebar.markdown("---")
-doc = st.sidebar.number_input("DOC (Profundidade) mm", value=1.0, step=0.1)
-woc = st.sidebar.number_input("WOC (Largura) mm", value=0.6, step=0.1)
-rpm = st.sidebar.number_input("RPM", value=13000, step=100)
-feed = st.sidebar.number_input("Avanço (mm/min)", value=1170, step=50)
-
-st.sidebar.markdown("---")
-with st.sidebar.expander("Dinâmica da Máquina (Z1)"):
-    fn = st.number_input("Frequência Natural (Hz)", value=450.0)
-    k = st.number_input("Rigidez (N/m)", value=5e6, format="%e")
-    zeta = st.number_input("Amortecimento", value=0.02)
+st.sidebar.header("Dinâmica da Makera Z1")
+rigidez = st.sidebar.number_input("Rigidez Estrutural (N/m)", value=5.0e6, format="%e", help="Estimativa base da Z1: 5e6 N/m")
+freq_natural = st.sidebar.number_input("Frequência Natural (Hz)", min_value=100, max_value=2000, value=800, step=50)
 
 # ==========================================
-# CÁLCULOS
+# 4. CÁLCULOS FÍSICOS (CINEMÁTICA E FORÇAS)
 # ==========================================
-ktc_mat, krc_mat = MATERIAIS[material]
-ang, Fx, Fy, Tq, chip = simular_forcas(D, flutes, hel, doc, woc, feed, rpm, ktc_mat, krc_mat)
-rpm_l, alim_l, min_est = simular_lobulos(fn, zeta, k, flutes, ktc_mat, woc, D)
-pot = np.max(Tq) * (rpm * 2 * np.pi / 60)
+# 4.1 Cinemática Básica
+chipload = avanco / (rpm * num_facas)  # mm/dente
+velocidade_corte = (np.pi * diametro * rpm) / 1000  # m/min
+mrr = (ap * ae * avanco) / 1000  # cm³/min
+
+# 4.2 Forças e Potência (Modelo simplificado de Kienzle)
+kc = materiais[material_escolhido]["kc"]
+m = materiais[material_escolhido]["m"]
+
+# Força Tangencial (aproximação)
+hm = chipload * np.sqrt(ae / diametro) if ae < diametro else chipload
+forca_tangencial = kc * ap * (hm ** (1 - m))
+
+# Potência do Spindle (Watts)
+potencia_corte = (forca_tangencial * velocidade_corte) / 60
 
 # ==========================================
-# INTERFACE WEB (RESULTADOS)
+# 5. CÁLCULO DOS LÓBULOS DE ESTABILIDADE (Altintas simplificado)
 # ==========================================
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Chipload", f"{chip:.3f} mm")
-col2.metric("Força Y Pico", f"{np.max(Fy):.1f} N")
-col3.metric("Potência Pico", f"{pot:.1f} W", delta="Alerta! >150W" if pot > 150 else "Seguro", delta_color="inverse")
-col4.metric("DOC Limite Seguro", f"< {min_est:.2f} mm")
+def calcular_lobulos(rigidez, freq_natural, num_facas, kc):
+    # Simulação simplificada de lóbulos para visualização
+    # Na prática, a matriz de resposta em frequência (FRF) exige números complexos
+    rpm_range = np.linspace(5000, 24000, 500)
+    
+    # Limite de estabilidade assintótica base (absoluta)
+    # a_lim = -1 / (2 * Re(FRF) * Kt * N_facas) -> Abstração para o gráfico
+    limite_absoluto = (2 * rigidez) / (kc * num_facas * 1000) # Fator de escala
+    
+    # Geração das "bolsas" de estabilidade (Ressonância)
+    lobulos = limite_absoluto + np.abs(np.sin((freq_natural * 60) / (rpm_range * num_facas) * np.pi)) * (limite_absoluto * 3)
+    
+    return rpm_range, lobulos, limite_absoluto
 
+rpm_plot, limite_ap, limite_abs = calcular_lobulos(rigidez, freq_natural, num_facas, kc)
+
+# ==========================================
+# 6. PAINEL DE RESULTADOS E AVISOS (DASHBOARD)
+# ==========================================
 st.markdown("---")
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Chipload (Espessura da Apara)", f"{chipload:.3f} mm/d", help="Valores ideais para alumínio: 0.01 a 0.05 mm/d")
+col2.metric("Potência Exigida", f"{potencia_corte:.1f} W")
+col3.metric("Velocidade de Corte (Vc)", f"{velocidade_corte:.0f} m/min")
+col4.metric("Taxa de Remoção (MRR)", f"{mrr:.1f} cm³/min")
+
+# Verificação do limite do Spindle da Makera Z1 (~150W)
+if potencia_corte > 150:
+    st.error(f"⚠️ Atenção! A potência calculada ({potencia_corte:.1f} W) ultrapassa o limite seguro do Spindle da Makera Z1 (150W). Risco de estagnar o motor.")
+else:
+    st.success("✅ Potência dentro dos limites da Makera Z1.")
 
 # ==========================================
-# GRÁFICOS WEB
+# 7. GRÁFICO DE ESTABILIDADE (MATPLOTLIB)
 # ==========================================
-fig, (ax_forcas, ax_lobulos) = plt.subplots(2, 1, figsize=(10, 10), facecolor='#0e1117')
-ax_forcas.set_facecolor('#0e1117')
-ax_lobulos.set_facecolor('#0e1117')
+st.subheader("Gráfico de Lóbulos de Estabilidade (Chatter)")
 
-# Gráfico 1
-ax_forcas.plot(np.degrees(ang), Fx, label='Força X', color='#4c72b0')
-ax_forcas.plot(np.degrees(ang), Fy, label='Força Y', color='#55a868')
-ax_forcas.plot(np.degrees(ang), Tq * 100, label='Torque (x100)', color='#c44e52', linestyle='--')
-ax_forcas.set_title("Ondas de Força Instantânea", color="white")
-ax_forcas.tick_params(colors='white')
-ax_forcas.grid(color='gray', linestyle=':', alpha=0.3)
-ax_forcas.legend()
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(rpm_plot, limite_ap, color='blue', linewidth=2, label='Limite de Chatter')
+ax.axhline(y=limite_abs, color='red', linestyle='--', label='Estabilidade Absoluta (Sem Chatter)')
 
-# Gráfico 2
-for i in range(len(rpm_l)):
-    ax_lobulos.plot(rpm_l[i], alim_l[i], color='#4c72b0')
-ax_lobulos.axhspan(0, min_est, color='#55a868', alpha=0.3, label="Estabilidade Absoluta")
-ax_lobulos.plot(rpm, doc, marker='X', color='red', markersize=12, label="Corte Atual", zorder=5)
+# Ponto atual do utilizador
+ax.plot(rpm, ap, marker='o', markersize=10, markeredgecolor='black', markerfacecolor='red', label='O Teu Corte')
 
-ax_lobulos.set_title("Lóbulos de Estabilidade (Previsão Chatter)", color="white")
-ax_lobulos.set_xlabel("RPM", color="white")
-ax_lobulos.set_ylabel("Profundidade Crítica (mm)", color="white")
-ax_lobulos.tick_params(colors='white')
-ax_lobulos.set_ylim(0, 8)
-ax_lobulos.set_xlim(4000, 16000)
-ax_lobulos.grid(color='gray', linestyle=':', alpha=0.3)
-ax_lobulos.legend()
+# Preencher zonas de estabilidade
+ax.fill_between(rpm_plot, 0, limite_ap, color='green', alpha=0.2)
+ax.fill_between(rpm_plot, limite_ap, np.max(limite_ap)+1, color='red', alpha=0.1)
 
-fig.tight_layout()
+ax.set_xlabel('Rotações (RPM)')
+ax.set_ylabel('Profundidade de Corte Limite - ap (mm)')
+ax.set_title(f'Estabilidade para {material_escolhido}')
+ax.set_xlim(5000, 24000)
+ax.set_ylim(0, np.max(limite_ap) if np.max(limite_ap) < 10 else 10)
+ax.legend()
+ax.grid(True, linestyle=':', alpha=0.7)
+
 st.pyplot(fig)
+
+# ==========================================
+# 8. NOVO: OTIMIZADOR DE ACABAMENTO SUPERFICIAL
+# ==========================================
+st.markdown("---")
+st.subheader("🎯 Otimizador de Acabamento Superficial")
+st.write("Calcula o avanço exato em mm/min para um passe final de acabamento espelhado, evitando empastar a fresa.")
+
+col_opt1, col_opt2 = st.columns([1, 2])
+
+with col_opt1:
+    chipload_alvo = st.slider(
+        "Chipload Desejado (mm/dente)", 
+        min_value=0.005, 
+        max_value=0.050, 
+        value=0.015, 
+        step=0.001,
+        format="%.3f",
+        help="Para acabamento espelhado no Alumínio 6061, recomenda-se entre 0.010 e 0.020 mm/dente."
+    )
+
+avanco_ideal = chipload_alvo * rpm * num_facas
+
+with col_opt2:
+    st.info(f"Para conseguires um **Chipload de {chipload_alvo:.3f} mm/dente** com a tua fresa de **{num_facas} cortes** a **{rpm} RPM**:")
+    st.success(f"🔥 **Avanço Recomendado: {avanco_ideal:.0f} mm/min**")
+    st.write(f"*Dica de CAM:* No teu passe de acabamento, usa estas RPM e este Avanço, mas corta apenas os últimos 0.1 a 0.2 mm da parede para não forçar a ferramenta.")
